@@ -50,7 +50,7 @@ jobs:
       # Work Order 1.10, Item 2 approach (i): checkout at the released tag,
       # then uses: ./ resolves to the released Action code.
       - name: Checkout at released tag
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ steps.tag.outputs.tag }}
           fetch-depth: 0
@@ -302,7 +302,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
