@@ -702,6 +702,8 @@
           "requests.put",
           "requests.patch",
           "requests.delete",
+          "requests.request",
+          "httpx.request",
           "httpx.post",
           "httpx.put",
           "httpx.patch",
@@ -715,6 +717,7 @@
           "session.put",
           "session.patch",
           "session.delete",
+          "session.request",
           "client.post",
           "client.put",
           "client.patch",
@@ -873,14 +876,7 @@
       "bp.post",
       "bp.put",
       "bp.delete",
-      "blueprint.route",
-      "get",
-      "post",
-      "put",
-      "delete",
-      "patch",
-      "route",
-      "api_route"
+      "blueprint.route"
     ],
     "tool_wrappers": [
       "Tool.from_function",
@@ -901,7 +897,8 @@
       "StructuredTool",
       "Action",
       "AgentAction",
-      "BaseAction"
+      "BaseAction",
+      "Toolkit"
     ],
     "tool_methods": [
       "_run",
@@ -916,7 +913,25 @@
       "tools",
       "toolkits",
       "functions",
-      "plugins"
+      "plugins",
+      "sync_tools",
+      "tools_list",
+      "handlers"
+    ],
+    "tool_registration_patterns": [
+      "server.call_tool",
+      "register_tool",
+      "add_tool_handler",
+      "register_function",
+      "register_for_llm",
+      "register_for_execution",
+      "call_tool",
+      "list_tools"
+    ],
+    "callback_executor_functions": [
+      "asyncio.to_thread",
+      "loop.run_in_executor",
+      "run_in_executor"
     ],
     "agent_frameworks": [
       "langchain",
@@ -969,7 +984,9 @@
         "permissions"
       ]
     },
-    "module_level_reachability": false
+    "module_level_reachability": false,
+    "resource_boundary_enabled": false,
+    "follow_local_calls_depth_1": true
   },
   "guard_patterns": [
     "verify_pccb",
@@ -978,6 +995,9 @@
     "ProtectedExecutor",
     "ProtectedExecutor.execute",
     "ActenonGate",
+    "ActenonGate.protect",
+    "ActenonGate.protect_action",
+    "protected_mcp_tool",
     "verify_proof",
     "verify_token",
     "verify_signature",

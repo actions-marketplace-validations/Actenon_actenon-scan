@@ -40,6 +40,17 @@ def format_json(result: ScanResult) -> str:
         for f in result.findings
         if not f.suppressed
     ]
+    # Phase 3.2 (A4): headline dedup — dedup by (file, line, rule_id)
+    # so a finding at the same location from both the per-file scan and
+    # the repository layer is counted once.
+    seen = set()
+    deduped = []
+    for f in findings:
+        key = (f["file"], f["line"], f["rule_id"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(f)
+    findings = deduped
     # Count by tier
     production_count = sum(1 for f in findings if f["tier"] == "production")
     example_count = sum(1 for f in findings if f["tier"] == "example")
@@ -106,6 +117,28 @@ def format_json(result: ScanResult) -> str:
             {"file": rel, "error": err}
             for rel, err in result.analysis_errors
         ],
+        # Task 5-A1: repository-level disclosure counts. Always present
+        # (even when the layer was disabled — both 0 in that case).
+        # ``transitive_followed_count`` = NEW findings the repo layer
+        # ADDED (sinks in helpers the per-file scan missed because the
+        # helper isn't @tool-decorated, but the repo layer proved
+        # transitively reachable from an agent entrypoint).
+        # ``transitive_unfollowed_count`` = UNRESOLVED call sites out
+        # of agent entrypoints (dynamic dispatch, external modules).
+        # Sinks reached only through these are NOT in the findings list.
+        # ``repository_analysis_enabled`` = whether the repo layer ran
+        # at all (False when the user passed --no-repository-analysis,
+        # or when the target was a single file rather than a dir).
+        "transitive_followed_count": getattr(result, "transitive_followed_count", 0),
+        "transitive_unfollowed_count": getattr(result, "transitive_unfollowed_count", 0),
+        "repository_analysis_enabled": getattr(result, "repository_analysis_enabled", False),
+        # Phase 3.3 (D10): default-exclude count
+        "default_excluded_count": getattr(result, "default_excluded_count", 0),
+        # Phase 3.2: per-edge detail for unfollowed local calls
+        "local_call_edges": getattr(result, "local_call_edges", []),
+        # Phase 3.2 (A3): analysis-coverage count pair
+        "local_calls_followed": getattr(result, "local_calls_followed", 0),
+        "local_calls_unfollowed": getattr(result, "local_calls_unfollowed", 0),
         # Field semantics: the "confidence" field on each finding measures
         # REACHABILITY confidence — how confident the scanner is that the
         # sink is agent-reachable (i.e., inside a @tool or @mcp.tool

@@ -16,8 +16,10 @@ from actenon_scan.report.blast_radius import (
     CLEAN_SCAN_LIMITATIONS,
     CLEAN_SCAN_STATEMENT,
     consequence_label,
+    default_exclude_disclosure_line,
     group_by_consequence,
     select_most_exposed,
+    transitive_disclosure_line,
 )
 
 
@@ -47,6 +49,16 @@ def format_pretty(result: ScanResult, *, elapsed: float | None = None) -> str:
             if result.unsupported_files:
                 cap_lines.append("")
                 cap_lines.extend(_format_unsupported(result))
+            # Task 5-A1: also surface the transitive-reachability
+            # disclosure line on the all-guarded clean scan, so users
+            # with capabilities-but-no-findings still see which
+            # agent-reachable calls the repo layer proved reachable
+            # vs. could not resolve. Omitted when the layer was
+            # disabled (--no-repository-analysis).
+            disclosure = transitive_disclosure_line(result)
+            if disclosure is not None:
+                cap_lines.append("")
+                cap_lines.append(disclosure)
             return "\n".join(cap_lines) + "\n"
         # Has both capabilities and findings — show capability summary
         # then the existing blast-radius output
@@ -150,6 +162,23 @@ def format_pretty(result: ScanResult, *, elapsed: float | None = None) -> str:
         if len(result.analysis_errors) > 10:
             lines.append(f"  ... and {len(result.analysis_errors) - 10} more")
 
+    # Task 1b: transitive-reachability disclosure. MUST appear in the
+    # findings case too — a directory scan with findings still has
+    # unfollowed transitive edges that are NOT in the findings list.
+    # The user needs to know how many agent-reachable calls the repo
+    # layer could not resolve, so they can audit them manually.
+    disclosure = transitive_disclosure_line(result)
+    if disclosure is not None:
+        lines.append("")
+        lines.append(disclosure)
+
+    # Phase 3.3 (D10): default-exclude disclosure. Files excluded by
+    # default patterns must be disclosed.
+    exclude_disclosure = default_exclude_disclosure_line(result)
+    if exclude_disclosure is not None:
+        lines.append("")
+        lines.append(exclude_disclosure)
+
     return "\n".join(lines) + "\n"
 
 
@@ -186,6 +215,21 @@ def _format_clean(result: ScanResult, elapsed: float | None = None) -> str:
     lines.append("")
     lines.append(CLEAN_SCAN_LIMITATIONS)
     lines.append("")
+    # Task 5-A1: transitive-reachability disclosure. Only rendered when
+    # the repo layer actually ran (``repository_analysis_enabled=True``).
+    # When the user passed ``--no-repository-analysis``, the line is
+    # omitted entirely to preserve the pre-5-A1 output shape for
+    # backwards compat with output parsers (verification step 5).
+    disclosure = transitive_disclosure_line(result)
+    if disclosure is not None:
+        lines.append(disclosure)
+        lines.append("")
+
+    # Phase 3.3 (D10): default-exclude disclosure in clean-scan too.
+    exclude_disclosure = default_exclude_disclosure_line(result)
+    if exclude_disclosure is not None:
+        lines.append(exclude_disclosure)
+        lines.append("")
 
     if result.unsupported_files:
         lang_counts = Counter(lang for _, lang in result.unsupported_files)
@@ -279,6 +323,12 @@ def format_list(result: ScanResult) -> str:
             lines.append("  actenon-scan parses Python, TypeScript, and Go. Other languages are not supported.")
         lines.append("")
 
+    # Task 1b: transitive disclosure in list format too.
+    disclosure = transitive_disclosure_line(result)
+    if disclosure is not None:
+        lines.append(disclosure)
+        lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
@@ -319,6 +369,18 @@ def _decorator_or_function(f: Finding) -> str:
             return "tool registration (AddTool/RegisterTool)"
         if "agent_framework_import" in reason:
             return "agent framework import"
+        # Phase 4: distinguish resource_boundary (HTTP route) from
+        # model-callable entry points. A resource_boundary signal means
+        # the function is an externally-callable HTTP endpoint, NOT a
+        # model-callable entry point. Saying "agent entry point" for
+        # an HTTP route is false — the model may or may not be the
+        # caller.
+        if "resource_boundary" in reason:
+            return "HTTP route handler (resource boundary)"
+        if "same_class_method" in reason or "local_call" in reason:
+            return "transitive local call"
+        if "dynamic_registration" in reason:
+            return "dynamic tool registration"
         return reason
 
     # Python findings: path-based guess (only for .py files).
@@ -337,6 +399,11 @@ def _extract_params(f: Finding) -> list[str]:
 
     This is a best-effort extraction for the summary. The full
     caller-controlled-parameter analysis lives in the brief/explain IR.
+
+    Phase 4: only report identifiers that look like function parameters
+    (simple names), NOT string literals or complex expressions. A SQL
+    string literal like "UPDATE runs SET status = ?" must NOT appear
+    as a "Model-controlled input".
     """
     # Extract arguments from the call text
     if "(" not in f.call_text:
@@ -361,11 +428,17 @@ def _extract_params(f: Finding) -> list[str]:
         if not arg:
             continue
         # Handle keyword args: name=value
-        if "=" in arg:
+        if "=" in arg and not arg.startswith(("'", '"', "[")):
             name = arg.split("=")[0].strip()
+            # Only report if the kwarg name looks like it could carry
+            # model-controlled data (not 'api_key', 'max_results', etc.)
+            # But we don't know which are constants without deeper analysis.
+            # Report the kwarg name — it's better than the literal value.
             params.append(name)
         else:
-            # Positional arg — use the variable name if it's a simple Name
-            if arg.isidentifier():
+            # Positional arg — only report if it's a simple identifier
+            # (a variable name), NOT a string literal or expression.
+            # String literals start with quotes; expressions have operators.
+            if arg.isidentifier() and not arg.startswith(("'", '"')):
                 params.append(arg)
     return params[:6]  # cap at 6 for width

@@ -634,3 +634,246 @@ directories and are illustrative code, not production paths.
 **Honest assessment of mcp-go production finding:** `client/transport/stdio.go:206` with `exec.CommandContext(ctx, c.command, c.args...)` is config-controlled by design — `c.command` and `c.args` are set by the MCP client at connection time, not by the model. The scanner cannot verify this from the call site alone (it would need cross-file data-flow analysis), so the finding is reported. A human reviewer would dismiss it, but the scanner's conservative stance (report rather than miss) is the correct default for this tool.
 
 
+
+
+---
+
+# Real-world reachability ground truth (research phase)
+
+Full report, artefacts and reproduction steps:
+[`research/reachability-ground-truth/`](research/reachability-ground-truth/README.md).
+Detection logic was not changed in this phase; the one correctness fix it
+produced shipped separately (token-anchored `.execute` receivers).
+
+## Branch history divergence — reported, not corrected
+
+**Severity:** NOTE (process)
+**Observed:** The session started on `claude/soundness-s02-binding-fix-j80wfc`
+at v0.8.0, whose history is **unrelated** to `main` (no merge base, different
+root commit). `main` was already at v1.4.0 and had absorbed the earlier s02
+work through PRs #26 and #29.
+**Action taken:** The research branch was cut from `origin/main` @ `25ee4f9`.
+Measuring the stale line would have produced ground truth about a scanner that
+no longer exists.
+
+## The "~3,001 unreachable sinks" figure does not carry over
+
+**Severity:** NOTE (measurement integrity)
+**Observed:** That figure came from a 10-repo corpus at v0.8.0. Rebuilt against
+the pinned 25-repo corpus at v1.4.0: **3,109** unreachable of 3,258 matched
+sinks across 15,364 scanned files. The near-equality is coincidence; the
+populations are different.
+**Recommendation:** Never compare a corpus count across corpus or version
+changes without re-deriving it.
+
+## Agno's step.execute() defect class was narrowed, not closed
+
+**Severity:** MAJOR (HIGH-severity false positive, demonstrated live)
+**Where:** `actenon_scan/detectors/sinks.py` — `_name_looks_db`
+**Observed:** The receiver constraint added for `step.execute()` matched
+receiver names by unanchored substring. `"sandbox"` contains `"db"`
+(san-**db**-ox), so `sandbox.execute(cmd)` — a shell executor — was reported as
+DATA-DELETE-SQL at HIGH. Confirmed on a minimal agent-reachable case.
+**Action taken:** Fixed in its own commit; matching is now token-anchored.
+Corpus delta over 2,761 `.execute`-family call sites: 1,471 receivers accepted
+before, 1,418 after; the 53-site difference is `sandbox_backend`, `sandbox` and
+`curr`, the last of which stays accepted through `_origin_is_db`.
+Pinned by `tests/test_db_receiver_anchoring.py` and precision fixture `p16`.
+
+## `@patch` from unittest.mock is treated as a web route
+
+**Severity:** MAJOR (latent HIGH-severity false positive; no corpus manifestation)
+**Where:** `actenon_scan/rules/default_rules.json` — `resource_boundary_decorators`;
+`actenon_scan/detectors/reachability.py` — `_has_resource_boundary_decorator`
+**Expected:** A resource boundary is an HTTP route handler.
+**Observed:** The list contains bare `"patch"`, `"get"`, `"post"`, `"delete"`,
+`"route"`, and matching is on the decorator's LAST SEGMENT. `@patch("mod.Thing")`
+from `unittest.mock` therefore scores HIGH-confidence reachable. Demonstrated:
+a mock-patched function containing `subprocess.run` produces EXEC-SHELL / HIGH.
+**Action taken:** NOT fixed — documented for a separate decision. The bare-verb
+entries do real work: `org_router.get`, `api_router.post`, `billing_router.get`
+and other custom routers appear throughout the corpus and would be lost. There
+is no corpus manifestation today because `@patch` lives in test files, which
+`_collect_files` excludes.
+**Recommendation:** Require attribute form for HTTP verbs, or suppress the bare
+form when the module imports `unittest.mock`.
+
+## Agno's Toolkit registration idiom is entirely invisible
+
+**Severity:** MAJOR (false-negative class, 4,255 corpus files affected)
+**Where:** `actenon_scan/detectors/reachability.py` — `_is_in_tool_list`
+**Observed:** Measured precisely:
+
+    tools=[run_cmd]                 -> DETECTED
+    tools=[self.run_cmd]            -> MISSED  (Attribute, not ast.Name)
+    tools = [...]; tools=tools      -> MISSED  (variable indirection)
+
+agno uses **both** missed forms, so every agno Toolkit tool is invisible. Six of
+the 22 confirmed agent-reachable sinks in the sample are this mechanism.
+`Workspace` goes further — `sync_tools = [getattr(self, name) for name in
+registered]` — which should become explicit UNKNOWN rather than a guess.
+**Action taken:** Recorded. This is the second-ranked engineering target.
+
+## GIT-MUTATE matches a read on repo.commit(revision)
+
+**Severity:** MINOR (latent false positive, hidden today by reachability)
+**Where:** `actenon_scan/rules/default_rules.json` — GIT-MUTATE
+**Observed:** `mcp-servers src/git/.../server.py:230` is genuinely agent-reachable
+(`@server.call_tool` → `git_show`), but the sink `repo.commit(revision)` *resolves*
+a revision in GitPython; it does not create a commit.
+**Recommendation:** Fixing reachability will surface latent sink-rule false
+positives like this one. Transitive-reachability work must budget for the
+sink-rule triage it exposes.
+
+## Ground-truth result
+
+**Severity:** NOTE (measurement)
+160-case deterministic stratified sample (seed 20260920) of the 3,109
+unreachable sinks: **22 AGENT_REACHABLE, 110 NOT_AGENT_REACHABLE (20 of them
+web-route-only), 28 AMBIGUOUS**.
+
+Real-world labelled sink recall is a **bracket, 14%–52%**, not a point: the
+sample was drawn from the unreachable population, so "detected among
+AGENT_REACHABLE" is 0 by construction and the estimate must be built from
+weighted population figures (149 detected vs ~138 estimated missed, with ~803
+ambiguous). This is a different number from synthetic recall (9/10) and from
+corpus-demonstrated architecture recall (3/10). The four metrics must never be
+collapsed.
+
+**P01 — transitive local reachability — is real, not theoretical:** 14 of 22
+(64%), 9 repositories, ~70 sinks estimated. 8 of 14 are a single hop, 9 of 14
+same-file, 12 of 14 methods. Nothing deeper than 3 hops was needed.
+
+The most severe individual case: `superagi/agent/output_handler.py:180` calls
+`eval()` directly on the LLM's `assistant_reply`. This is
+[CVE-2024-21552](https://nvd.nist.gov/vuln/detail/CVE-2024-21552) (CVSS 9.8,
+public since 2024; NVD lists all versions affected, no remediation). See
+[REDISCOVERY-CVE-2024-21552.md](research/reachability-ground-truth/REDISCOVERY-CVE-2024-21552.md).
+The scanner matched the `eval()` sink but did **not** connect it to an agent
+boundary — it is one of the 19 misses (mechanism `LLM_OUTPUT_TO_SINK`). Human
+ground-truth adjudication identified the path.
+
+## The transitive reachability layer exists, is enabled, and resolves few edges on real code
+
+> **Correction note (2026-09-20):** A previous version of this section
+> stated the repository layer "resolves 0.06% of transitive edges" and
+> presented the ratio `2 / 3,297 = 0.06%` as a resolution rate. That
+> ratio is a **unit error**. The numerator (`transitive_followed_count` =
+> 2) counts **new findings** the repository layer emitted. The
+> denominator (`transitive_unfollowed_count` = 3,297) counts
+> **unresolved call sites directly out of agent entrypoints**, which
+> includes every call to an external library (`subprocess.run`,
+> `requests.post`, `json.loads`, etc.). Dividing findings by call
+> sites produces a number with no physical meaning. The 0.06% figure
+> has been removed from this section, the CHANGELOG, and the research
+> README.
+>
+> **What is defensible:** the repository layer is on by default for
+> directory targets (`--no-repository-analysis` to opt out). It
+> resolves same-file module-level calls — verified by:
+> ```
+> mkdir /tmp/demo && cat > /tmp/demo/agent.py << 'EOF'
+> from langchain.tools import tool; import subprocess
+> @tool
+> def entry(): helper()
+> def helper(): subprocess.run("ls", shell=True)
+> EOF
+> actenon_scan scan /tmp/demo --no-cache
+> ```
+> This produces a finding at the `subprocess.run` line with
+> `Reachable by: transitive:agent.entry → agent.helper`. On the 22
+> hand-verified AGENT_REACHABLE sinks in the labelled corpus, the full
+> scanner catches **3/22** (via same-class method resolution, Task 2).
+> The `transitive_unfollowed_count` as currently defined includes
+> external-library calls and is **not a resolution rate** — it is a
+> count of unresolved call sites, which is a different unit from
+> findings. A correct resolution rate would require both numerator and
+> denominator in the same unit (e.g., call sites resolved / call sites
+> total), which is not currently computed.
+
+**Severity:** MAJOR (a shipped capability that does not function on real code)
+**Where:** `actenon_scan/repository/` — `engine_augment.analyze_repository`,
+`call_graph.py`, `symbol_index.py`
+**Expected:** The repository layer has been on by default since `25ee4f9`
+(`--no-repository-analysis` to opt out), builds a call graph and computes
+transitive reachability to `max_depth=32`. Sinks reachable only through a call
+chain from an agent entrypoint should be found.
+**Observed:** Across the ten corpus repositories containing the 22
+hand-confirmed agent-reachable sinks:
+
+    transitive call edges followed        2
+    transitive call edges unfollowed  3,297
+    AGENT_REACHABLE cases caught       0 / 22
+
+(The `2` is `transitive_followed_count` — new findings emitted. The `3,297` is
+`transitive_unfollowed_count` — unresolved call sites out of entry points,
+including external-library calls. These are **different units** and their ratio
+is not a resolution rate. See the correction note above.)
+
+Per repository — mcp-atlassian 0/1,279 · crewai 0/887 · mcp-python-sdk 2/408 ·
+superagi 0/387 · agno 0/281 · langchain 0/41 · autogen 0/14.
+
+Depth is not the constraint: no confirmed case needed more than 3 hops, and 8
+of 14 transitive cases are a single hop. 9 of 14 are same-file and 12 of 14 are
+methods — `self._helper(...)` beside a sibling method that is already a
+recognised boundary.
+
+A second contributing cause: `RepositoryAnalysisConfig(emit_heuristic_new_findings=False)`
+in `engine.py`, so even a followed path emits no new finding unless certainty
+is high.
+
+**Action taken:** None — this phase changes no detection logic. Recorded as the
+single highest-value next engineering target.
+**Recommendation:** Do not build a second transitive layer. Fix callee
+resolution in the existing one, starting with same-file same-class method
+calls. `transitive_unfollowed_count` is already recorded on every `ScanResult`
+and is the regression instrument. Note that raising reachability will surface
+latent sink-rule false positives (see the GIT-MUTATE entry above).
+
+## Committed corpus evidence is stale; 19 live findings in control repos
+
+**Severity:** MAJOR (a precision gate that cannot fail, over data that no
+longer describes the code)
+**Where:** `tests/benchmark/corpus-results.json`, `corpus-triage.json`,
+`scripts/check_corpus_triage.py`
+**Expected:** The corpus gate asserts precision against the pinned 25-repo
+corpus, and any finding in a control repo (requests, flask, fastapi, click,
+rich) is a precision failure by definition.
+**Observed:** Re-running `scripts/corpus_scan.py` against the same pinned SHAs
+at `main` @ `25ee4f9` produces **135 findings**, not the 21 recorded:
+
+    repo            committed   fresh
+    superagi                6      65
+    openhands               0      31
+    fastapi  (CONTROL)      0      18
+    autogen                 0       4
+    flask    (CONTROL)      0       1
+    github-mcp-server       0       1
+    crewai / metagpt / mcp-servers / mcp-python-sdk  unchanged
+
+`corpus_scan.py` exits with `PRECISION FAILURE: 19 finding(s) in non-agent
+control repos`. `check_corpus_triage.py` nevertheless passes, because it
+validates the committed JSON rather than a fresh scan, so the gate cannot
+observe the regression it exists to prevent.
+
+Confirmed **pre-existing and unrelated to this branch**: reverting
+`detectors/sinks.py` to `25ee4f9` and re-scanning gives the identical
+fastapi 18 / flask 1. The token-anchoring fix only narrows receiver
+acceptance and cannot add findings.
+
+**Action taken:** None — this research phase changes no detection logic, and
+regenerating the evidence requires hand-triaging all 135 findings, which is a
+work order of its own.
+**Recommendation:** Two separate defects. (1) Triage the 19 control-repo
+findings; they are precision failures by the corpus's own definition. (2) Make
+the gate scan rather than read, or add a scheduled job that fails when the
+committed evidence drifts from a fresh scan — otherwise the evidence ages
+silently, exactly as it has here.
+
+---
+
+## Staged Version Bump — `actenon-scan 1.6.0` (Coordinated Unicorn Release)
+
+- `pyproject.toml` is staged at `1.6.0` ahead of the `v1.6.0` release tag and PyPI publication (`v1.5.0` remains the latest tagged/published release on PyPI).
+- Tagging `v1.6.0` is intentionally deferred until all downstream repositories (`actenon-protocol`, `actenon-kernel`, `actenon-scan`, `sdk-go`, `sdk-rust`, `actenon-permit`, `actenon-airlock`) pass cross-repo verification on `main`, so `ASSERT B` (`newest_tag == pypi_latest`) and `ASSERT C` (`pyproject_version` documented in `FINDINGS.md`) remain coherent throughout staging.
+

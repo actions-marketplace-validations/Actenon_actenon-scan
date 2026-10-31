@@ -272,6 +272,83 @@ CLEAN_SCAN_LIMITATIONS = (
 )
 
 
+def transitive_disclosure_line(result: ScanResult) -> str | None:
+    """Render the repository-analysis disclosure line for the clean-scan
+    output (Task 5-A1).
+
+    Returns ``None`` when the repository-level augmentation pass did NOT
+    run (i.e. ``repository_analysis_enabled=False``). In that case the
+    reporters skip the disclosure line entirely, preserving the
+    pre-5-A1 output shape for backwards compat with users who pass
+    ``--no-repository-analysis`` and parse the output.
+
+    When the layer DID run, the line discloses:
+      * how many transitively-reachable sinks it caught (sinks the
+        per-file scan missed because the enclosing helper isn't
+        @tool-decorated, but the repo layer proved reachable from an
+        agent entrypoint) — ``transitive_followed_count``.
+      * how many call sites out of agent entrypoints could NOT be
+        resolved (dynamic dispatch, external modules) —
+        ``transitive_unfollowed_count``. Sinks reached only through
+        these calls are NOT in the findings list; the disclosure tells
+        the user these unfollowable calls exist so they can audit them.
+
+    The wording is observational, not absolute. RULE 7 (no overstatement
+    of safety) applies: we never claim "no transitive sinks exist",
+    only "0 transitively-reachable sinks were identified".
+    """
+    if not getattr(result, "repository_analysis_enabled", False):
+        # Layer disabled — return None so reporters can skip the line
+        # and preserve the pre-5-A1 output shape (verification step 5:
+        # ``--no-repository-analysis`` produces the OLD output).
+        return None
+    followed = getattr(result, "transitive_followed_count", 0)
+    unfollowed = getattr(result, "transitive_unfollowed_count", 0)
+    # Pluralisation
+    sink_word = "sink" if followed == 1 else "sinks"
+    call_word = "call" if unfollowed == 1 else "calls"
+    line = (
+        f"Repository analysis: {followed} transitively-reachable {sink_word} "
+        f"caught (would have been missed by per-file scan); "
+        f"{unfollowed} unresolved agent-entrypoint {call_word} not followed "
+        f"(dynamic dispatch / external modules)."
+    )
+    # Phase 3.3 (D10): default-exclude disclosure. Files excluded by
+    # default patterns (venv, build, tests/fixtures, test files) are
+    # silent. This count must be disclosed so the user knows files
+    # were excluded.
+    excluded = getattr(result, "default_excluded_count", 0)
+    if excluded > 0:
+        file_word = "file" if excluded == 1 else "files"
+        line += f" {excluded} {file_word} excluded by default patterns (venv/build/test fixtures)."
+    # Phase 3.2 (A3): analysis-coverage count pair — both sides observed.
+    followed = getattr(result, "local_calls_followed", 0)
+    unfollowed_local = getattr(result, "local_calls_unfollowed", 0)
+    if followed > 0 or unfollowed_local > 0:
+        line += f" Local call analysis: {followed} followed, {unfollowed_local} unfollowed."
+    return line
+
+
+def default_exclude_disclosure_line(result: ScanResult) -> str | None:
+    """Render the default-exclude disclosure line (Phase 3.3 / D10).
+
+    Returns None when no files were excluded by default patterns.
+    Otherwise returns a line disclosing the count.
+
+    This is SEPARATE from transitive_disclosure_line because the
+    default-exclude count applies to ALL directory scans regardless
+    of whether the repository layer is enabled.
+    """
+    excluded = getattr(result, "default_excluded_count", 0)
+    if excluded == 0:
+        return None
+    file_word = "file" if excluded == 1 else "files"
+    return (
+        f"Default-exclude: {excluded} {file_word} excluded by default "
+        f"patterns (venv/build/test fixtures/tests). Use --include to scan them."
+    )
+
+
 def _extract_method_name(call_text: str) -> str:
     """Extract the final method name from a call text.
 

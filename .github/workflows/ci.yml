@@ -66,9 +66,62 @@ jobs:
           echo "OK: zero third-party runtime deps"
       - name: Verify import works without extra
         run: /tmp/base/bin/python -c "import actenon_scan; print('OK')"
+      - name: Install mandatory test-only schema verifier after checking runtime isolation
+        run: /tmp/base/bin/pip install -r specs/AREF-002A/requirements-validation.txt
       - name: Run tests (skipping TS-specific and dev-dep tests)
         run: /tmp/base/bin/python -m pytest tests/ -v --ignore=tests/test_protocol_drift.py
 
 
+  architecture-conformance:
+    name: Required AREF-002A/002B/002C proof-model conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install mandatory verifier and test dependencies
+        run: |
+          python -m pip install -r specs/AREF-002A/requirements-validation.txt
+          python -m pip install -e ".[dev]"
+      - name: Validate unchanged normative package in its frozen preservation context
+        run: python -B scripts/validate_aref002a.py
+      - name: Validate unchanged budget amendment and its sealed examples
+        run: python -B specs/AREF-002B/validate.py
+      - name: Validate adopted contract-provenance profile and its sealed examples
+        run: python -B specs/AREF-002C/validate.py --upstream .
+      - name: Validate current runtime against the superseding frozen contracts
+        run: python -B -m pytest tests/effect_claims -q
+
   # The verify-claims job moved to verify-claims.yml so the README
   # badge can link to a dedicated gate.
+
+  # The test jobs install editable, which puts the source tree on sys.path
+  # and hides packaging mistakes: a subpackage missing from pyproject's
+  # package list still imports. This job installs the BUILT wheel into a
+  # clean venv and runs a real directory scan, which imports every layer
+  # (a wheel without actenon_scan.repository crashed here).
+  wheel-smoke:
+    name: Built wheel installs and scans a directory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist/
+      - name: Install wheel into a clean venv (outside the checkout)
+        run: |
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install dist/actenon_scan-*.whl
+      - name: Scan a directory with the installed wheel
+        working-directory: /tmp
+        run: |
+          /tmp/wheel-venv/bin/actenon-scan scan "$GITHUB_WORKSPACE/tests/benchmark/recall" \
+            --format json --output /tmp/wheel-scan.json --fail-on none --no-cache
+          /tmp/wheel-venv/bin/python -c "import json; d=json.load(open('/tmp/wheel-scan.json')); assert d['repository_analysis_enabled'] and d['finding_count'] > 0, d; print('OK', d['finding_count'], 'findings')"

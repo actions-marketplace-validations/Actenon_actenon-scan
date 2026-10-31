@@ -114,6 +114,56 @@ def main(argv: list[str] | None = None) -> int:
              "Use this in CI to keep the cache on a persistent volume "
              "across runs, or to avoid polluting the workspace.",
     )
+    scan_parser.add_argument(
+        "--no-repository-analysis",
+        action="store_true",
+        default=False,
+        help="Disable repository-level consequence analysis (the DEFAULT "
+             "since v0.x): call-graph construction, transitive "
+             "reachability from @tool entrypoints, effect-summary "
+             "propagation. By default the scanner AUGMENTS per-file "
+             "findings with sinks in helpers only reachable "
+             "transitively (Claude's review case: @mcp.tool() calls a "
+             "one-line local helper that does requests.post — per-file "
+             "scan misses it; default scan catches it). Pass this flag "
+             "to opt OUT for backwards-compat with pre-v0.x behaviour "
+             "(per-file scan only). Per-file findings are NEVER "
+             "suppressed by the repo layer.",
+    )
+    # Backwards-compat: --repository-analysis is now a no-op (it was
+    # opt-in before Task 5-A1; the layer is now ON by default). We
+    # accept the flag, print a one-line deprecation warning to stderr,
+    # and continue. Hidden from --help to avoid confusion.
+    scan_parser.add_argument(
+        "--repository-analysis",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+
+    # Task 4c: --resource-boundary makes web route handlers opt-in.
+    scan_parser.add_argument(
+        "--resource-boundary",
+        action="store_true",
+        default=False,
+        help="Also treat web route handlers (@app.route, @router.post, "
+             "@bp.get, etc.) as entry points. Off by default: a route "
+             "decorator is not evidence that an agent is involved, and "
+             "enabling it reports plain web views with no agent "
+             "framework present. Bare decorator names (@get, @post) "
+             "are NEVER matched — they collide with @patch from "
+             "unittest.mock and similar.",
+    )
+    # Phase 3.2 (A5): --include-fixtures overrides the default exclude
+    # for actenon-scan's own test fixtures (**/tests/fixtures/**).
+    scan_parser.add_argument(
+        "--include-fixtures",
+        action="store_true",
+        default=False,
+        help="Include actenon-scan's own test fixtures (tests/fixtures/) "
+             "in the scan. Excluded by default — the fixtures are the "
+             "scanner's own test code, not the user's blast radius.",
+    )
 
     # rules
     _rules_parser = subparsers.add_parser("rules", help="List active rules.")
@@ -291,6 +341,23 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # install
+    authority_parser = subparsers.add_parser(
+        "authority",
+        help="List every consequential capability as structured evidence (action, resource, provenance).",
+    )
+    authority_parser.add_argument("path", help="Project directory to analyse (Python).")
+    authority_parser.add_argument("--format", choices=["json", "text", "diff"], default="text")
+    authority_parser.add_argument("--include-tests", action="store_true", help="Also analyse test files.")
+    authority_parser.add_argument("--no-env-files", action="store_true", help="Do not read .env / .env.local.")
+    authority_parser.add_argument(
+        "--diff",
+        nargs="?",
+        const="__EMPTY__",
+        default=None,
+        metavar="BASE_PATH",
+        help="Render an AIRLOCK AUTHORITY DIFF against BASE_PATH (or against an empty baseline when omitted).",
+    )
+
     install_parser = subparsers.add_parser(
         "install",
         help="Install actenon-scan into a project (GitHub Actions, pre-commit).",
@@ -352,12 +419,57 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_fix(args)
     elif args.command == "install":
         return _cmd_install(args)
+    elif args.command == "authority":
+        return _cmd_authority(args)
     else:
         parser.print_help()
         return 0
 
 
+def _cmd_authority(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from .authority import diff_authority, extract_authority, format_authority_diff
+
+    report = extract_authority(args.path, include_tests=args.include_tests, read_env_files=not args.no_env_files)
+    if getattr(args, "diff", None) is not None or args.format == "diff":
+        base_arg = getattr(args, "diff", None)
+        before = None if base_arg in (None, "__EMPTY__") else base_arg
+        diff = diff_authority(
+            before,
+            report,
+            include_tests=args.include_tests,
+            read_env_files=not args.no_env_files,
+        )
+        if args.format == "json":
+            print(_json.dumps(diff.to_dict(), indent=2))
+        else:
+            print(format_authority_diff(diff))
+        return 0
+    if args.format == "json":
+        print(_json.dumps(report.to_dict(), indent=2))
+        return 0
+    for ev in report.evidence:
+        where = ev.resource if ev.resource is not None else "UNRESOLVED (" + ", ".join(ev.unresolved_parts) + ")"
+        print(f"{ev.action:28} {where}")
+        print(f"{'':28} {ev.resource_state.value.lower()} · {ev.file}:{ev.line} in {ev.function} · via {ev.via}")
+    print(f"\n{len(report.evidence)} consequential capabilities in {report.files_analysed} files"
+          + (f"; {len(report.parse_errors)} files could not be parsed" if report.parse_errors else ""))
+    return 0
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
+    # Task 5-A1: --repository-analysis is now a no-op (the layer is ON
+    # by default). Print a one-line deprecation warning so users know to
+    # stop passing the flag. Behaviour is unchanged: the layer still
+    # runs (because that's what --repository-analysis used to request).
+    if getattr(args, "repository_analysis", False):
+        print(
+            "actenon-scan: warning: --repository-analysis is a no-op "
+            "(repository analysis is now the default). Re-run without "
+            "the flag, or use --no-repository-analysis to disable.",
+            file=sys.stderr,
+        )
     # Normalize to a single `target` plus optional `explicit_files` for the
     # multi-path case (pre-commit passes one path per changed file).
     paths = [Path(p) for p in args.path]
@@ -453,6 +565,17 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         exclude_globs.extend(auto_exclude)
     if args.changed_only:
         changed_files = _get_changed_files(args.changed_only, target)
+        if changed_files is None:
+            # git could not compute the diff (unknown ref, not a repo, no
+            # git). Reporting "nothing changed" here would turn a failure
+            # to analyse into a clean result.
+            print(
+                f"actenon-scan: --changed-only {args.changed_only}: could not "
+                f"determine the changed files (see the git error above). "
+                f"No clean result is reported for a scan that did not run.",
+                file=sys.stderr,
+            )
+            return 2
         if not changed_files:
             # P1-5 fix: previously, an empty git diff silently fell through
             # to a full scan (because explicit_files stayed None and the
@@ -465,10 +588,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 f"Nothing to scan.",
                 file=sys.stderr,
             )
-            # Print an empty result so callers piping output get something.
-            from actenon_scan.report.pretty import format_pretty as _fp
+            # Emit an empty result in the requested format (and to
+            # --output) so callers that read the output file get one.
             from actenon_scan.engine import ScanResult as _SR
-            print(_fp(_SR()), end="")
+            _emit_scan_output(args, _SR(), None)
             return 0
         # Pass the exact paths through rather than converting to include
         # globs: globbing still walked the entire tree before filtering,
@@ -511,9 +634,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                     f"excluded by config. Nothing to scan.",
                     file=sys.stderr,
                 )
-                from actenon_scan.report.pretty import format_pretty as _fp2
                 from actenon_scan.engine import ScanResult as _SR2
-                print(_fp2(_SR2()), end="")
+                _emit_scan_output(args, _SR2(), None)
                 return 0
 
     try:
@@ -579,6 +701,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 on_finding=on_finding,
             )
         else:
+            # Task 5-A1: ``repository_analysis`` is now ON by default.
+            # ``--no-repository-analysis`` flips it off (backwards-compat
+            # with pre-5-A1 behaviour). The deprecated
+            # ``--repository-analysis`` flag is a no-op (warning printed
+            # above); the layer runs because it's the default.
             result = scan_path(
                 target,
                 config=config_path,
@@ -589,6 +716,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 baseline_findings=baseline,
                 cache=cache,
                 on_finding=on_finding,
+                repository_analysis=not getattr(args, "no_repository_analysis", False),
+                resource_boundary=(
+                    True if getattr(args, "resource_boundary", False) else None
+                ),
+                include_fixtures=getattr(args, "include_fixtures", False),
             )
         result._elapsed = _time.perf_counter() - _t0
     except Exception as e:
@@ -600,29 +732,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             return 2
         raise
 
-    # Format output
-    _elapsed = getattr(result, "_elapsed", None)
-
-    if args.format == "json":
-        output = format_json(result)
-    elif args.format == "sarif":
-        output = format_sarif(result)
-    elif args.format == "list":
-        output = format_list(result)
-    elif args.format == "html":
-        from actenon_scan.report.html_out import format_html
-        output = format_html(result, elapsed=_elapsed)
-    elif args.format == "markdown":
-        from actenon_scan.report.markdown_out import format_markdown
-        output = format_markdown(result, elapsed=_elapsed)
-    else:
-        # Default: blast-radius summary
-        output = format_pretty(result, elapsed=_elapsed)
-
-    if args.output:
-        Path(args.output).write_text(output)
-    else:
-        print(output, end="")
+    _emit_scan_output(args, result, getattr(result, "_elapsed", None))
 
     # Exit code
     # Unsupported files alone do NOT fail the build (default). Use
@@ -634,6 +744,30 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if result.has_findings_at_or_above(args.fail_on):
         return 1
     return 0
+
+
+def _emit_scan_output(args: argparse.Namespace, result, elapsed) -> None:
+    """Render ``result`` in ``args.format`` to ``args.output`` or stdout."""
+    if args.format == "json":
+        output = format_json(result)
+    elif args.format == "sarif":
+        output = format_sarif(result)
+    elif args.format == "list":
+        output = format_list(result)
+    elif args.format == "html":
+        from actenon_scan.report.html_out import format_html
+        output = format_html(result, elapsed=elapsed)
+    elif args.format == "markdown":
+        from actenon_scan.report.markdown_out import format_markdown
+        output = format_markdown(result, elapsed=elapsed)
+    else:
+        # Default: blast-radius summary
+        output = format_pretty(result, elapsed=elapsed)
+
+    if args.output:
+        Path(args.output).write_text(output)
+    else:
+        print(output, end="")
 
 
 def _cmd_rules(args: argparse.Namespace) -> int:
@@ -914,8 +1048,12 @@ def _cmd_adopt(args: argparse.Namespace) -> int:
     return 1 if result.has_findings_at_or_above("medium") else 0
 
 
-def _get_changed_files(git_ref: str, target: Path) -> list[str]:
+def _get_changed_files(git_ref: str, target: Path) -> list[str] | None:
     """Get files changed since a git ref, relative to target.
+
+    Returns ``None`` when git cannot compute the diff (unknown ref, not a
+    repository, git missing) and ``[]`` when nothing scannable changed —
+    the caller must not treat the first as the second.
 
     Returns .py, .ts, .tsx, .js, .jsx, .mjs, .cjs, and .go files. The
     previous implementation only returned .py files, which meant the
@@ -944,7 +1082,7 @@ def _get_changed_files(git_ref: str, target: Path) -> list[str]:
             f.strip() for f in result.stdout.splitlines()
             if f.strip().endswith(scannable_exts)
         ]
-        return changed if changed else None
+        return changed
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"Warning: --changed-only requires git: {e}", file=sys.stderr)
         return None

@@ -26,9 +26,221 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing repos; this is NOT a breaking change (the ruleset version in
   `default_rules.json` is bumped instead).
 
+## [1.6.0] — unreleased (release candidate)
+
+### Added
+- `normalise_path` is exported from `actenon_scan.authority` so runtime enforcement can spell filesystem
+  resources the same way the extractor does. The private `_normalise_path` name remains.
+- `tiktoken.get_encoding` and `tiktoken.encoding_for_model` are named as `http.get` of
+  `https://openaipublic.blob.core.windows.net/encodings/<encoding>.tiktoken`. A literal encoding or a
+  known model prefix resolves; any other encoding or model stays `UNRESOLVED`. This is static naming,
+  not an OS jail, and it does not change finding-scanner output, labelled-sample recall, or corpus triage.
+- `actenon_scan.authority`: structured authority evidence for Python projects. Every consequential call
+  (HTTP requests, OpenAI/Anthropic/LangChain model calls, PyGithub operations, file writes and deletes,
+  process execution, SMTP) becomes an `AuthorityEvidence` record with `action`, `resource`,
+  `resource_state` (RESOLVED / TEMPLATE / UNRESOLVED), unresolved parts, provenance of every input
+  (literal, constant, `.env`/environment value, parameter), source location, the complete call, the API
+  that performs it, and whether the enclosing function is an agent tool. Resources are resolved through
+  constants, `self.` attributes, f-strings and helper-function call sites; dynamic parts stay unresolved
+  and secret-looking configuration values are never inlined. `routes.classify_http` is the
+  request-to-authority vocabulary shared with runtime enforcement (Airlock); GitHub REST routes map to
+  `github.*` actions on `github.com/<owner>/<repo>`.
+- `actenon-scan authority PATH [--format json|text]`.
+
+### Fixed
+- `classify_http` ended the host at `/`, so `https://host?query` was named `host?query` while the same
+  request with a `/` path was named `host`. The authority now ends at the first `/`, `?` or `#` (RFC 3986).
+- `corpus-triage.json` records `scanner_version_measured_with` 1.6.0 so the claims staleness check matches
+  this unreleased package. The hand-triaged entries, totals, and 2026-09-21 measurement are unchanged.
+- `requests.request(...)`, `httpx.request(...)` and `session.request(...)` were invisible to the
+  `NET-EGRESS` rule.
+- `call_text` was truncated to 120 characters (80 for some chains in the Python, TypeScript and Go
+  detectors), cutting long URLs mid-way. It now holds the complete call; snippet hashes (baselines) are
+  computed from the source line and are unchanged.
+
+## [1.5.0] — 2026-09-20
+
+### Public corrections (Phase 1)
+
+- Retracted the 0.06% claim (unit error: findings divided by call sites)
+- CVE-2024-21552 rediscovery note (scanner matched sink, did not connect
+  to agent boundary; human adjudication identified the path)
+- DISCLOSURE_POLICY.md: pre-draft checks (NVD/OSV/GHSA), unsent drafts
+  never committed to this repository
+- Withdrew the 43%-52% recall bracket (three defects: direction bias,
+  scope-as-adjudication, misclassified highest-weight case)
+- README: replaced "Every claim above is machine-verified" with
+  "Machine-verified package claims" (names only what verify-claims.yml
+  actually verifies)
+
+### Cache determinism fix (Phase 2 / D1)
+
+- Capabilities now cached alongside findings (warm cache capability
+  summary agrees with findings count)
+- Declarative-guard suppression preserved on cache hit (follows from
+  file content, which the cache key hashes)
+- `entry_schema_version=2` in cache key (prior schema entries rejected)
+
+### Default-exclude disclosure (Phase 3 / D10)
+
+- Files excluded by default patterns (venv, build, tests/fixtures, test
+  files) are now counted and the count is printed in every output path
+- `default_excluded_count` field added to `ScanResult` and JSON output
+- A file under `tests/fixtures/` is disclosed as excluded, not silent
+
+### Re-adjudicated recall bracket (Phase 4)
+
+- Pre-registered `ADJUDICATION_RULES.md` before any re-examination
+- 16 Task-5 cases re-adjudicated: 2 moved to AGENT_REACHABLE, 14 to
+  NOT_AGENT_REACHABLE, 0 stayed AMBIGUOUS (NOT one-directional)
+- Brackets: (a) examples in scope: 27.6%-31.0%; (b) examples out of
+  scope: 26.1%-29.4%
+- LoadAndSearchToolSpec.load traced: load IS agent-facing but does NOT
+  chain to drop_table_purge
+- These are the historical Phase 4 labelled-sample brackets, not a fresh
+  measurement of the release candidate after the later reachability fixes.
+  Keep labelled-sample recall separate from synthetic benchmarks and the
+  corpus-demonstrated architecture count.
+
+### LLM output to sink (Phase 5.3)
+
+- `LLM_OUTPUT_TO_SINK` mechanism documented as NOT COVERED in
+  `docs/COVERAGE.md` with CVE-2024-21552 as motivating example
+- `tests/challenge/CHALLENGE-005.yml` filed as open challenge
+
+### README truth pass (Phase 6)
+
+- Repository layer documented (default-on, --no-repository-analysis,
+  disclosure counts)
+- Cross-file guard protection tested: guard in caller NOT detected for
+  sink in callee (documented limitation)
+- Guard detection stated as AST ancestry (lexical), not CFG dominance
+- Pre-commit rev pin updated (v1.2.0 → v1.4.0)
+- Category mismatch fixed: 16/16/16 (detection table = component
+  table = default_rules.json categories)
+
+### Reconciliation ledger (Phase 3.1)
+
+- `docs/RECONCILIATION-disclose-analysis-gaps.md`: 14 commits
+  classified at that stage (3 PORTED, 2 SUPERSEDED, 9 NOT_PORTED).
+  Later work shipped several of the items recorded there as unported.
+
+### Bare-verb reconciliation (Task 4c, carried from main)
+
+- `--resource-boundary` flag (opt-in, not default)
+- Bare decorator names removed (`@get`, `@post`, `@patch` — prevents
+  collision with `@patch` from `unittest.mock`)
+- Qualified forms kept (`@app.get`, `@router.post`, `@org_router.get`)
+
+### Subsequent reachability and reporting fixes (Phases 3.2, 5.1-5.2)
+
+- Recognise supported MCP callback and local tool-list registration
+  patterns, nested tool helpers, and bounded local helper chains.
+  Regression fixtures include `r15_mcp_callback_registration.py`,
+  `r16_local_list_registration.py`, and `r17_nested_tool_helper_call.py`.
+- Local call-edge detail and followed/unfollowed counts are exposed;
+  `--include-fixtures` permits an explicit fixture scan. Headline findings
+  are deduplicated, call-on-a-call spelling is handled, and synthetic
+  recall is reported by hop depth.
+- `CHALLENGE-004` records the fixed bare-decorator collision.
+- Corpus re-measurement is recorded with a 2026-09-21 measurement date.
+  The committed snapshot is historical evidence; it does not replace
+  the release checklist's verification of the current candidate.
+
+### Remaining limitations and unfinished work
+
+- General dynamic dispatch and cross-repository reasoning remain outside
+  the supported local reachability patterns. `LLM_OUTPUT_TO_SINK` remains
+  NOT COVERED, as described above.
+- Fresh release-candidate corpus and installed-package verification must
+  pass before publication; the historical recall brackets above have not
+  been reweighted here to claim gains from the later fixes.
+- Phase 7.3: branch report partially done (10 merged deleted, 67
+  non-merged listed for human decision at the time of that report)
+
+
 ## [Unreleased]
 
-_No changes yet._
+### Repository-level analysis: honesty disclosure
+
+> **Correction note (2026-09-20):** A previous version of this entry
+> stated the repository layer "resolved only 0.06% of transitive edges
+> (2 followed, 3,297 unfollowed)." That ratio is a **unit error**:
+> the numerator counts new findings emitted; the denominator counts
+> unresolved call sites out of entry points (including external-library
+> calls). Dividing findings by call sites produces a number with no
+> physical meaning. The 0.06% figure has been removed. What is
+> defensible: the repository layer is on by default, resolves same-file
+> module-level calls, and catches 3/22 hand-verified AGENT_REACHABLE
+> sinks. The `transitive_unfollowed_count` is not a resolution rate.
+
+The repository-level analysis layer (call graph, symbol index, taint)
+was enabled by default in v1.4.0. The unfollowed count was recorded on
+`ScanResult` but not printed in most output paths — a directory scan
+reported clean over unexamined edges with no indication.
+
+**Fixed**: the `transitive_unfollowed_count` now appears in every
+output path (pretty, list, json, sarif, markdown, html) — both in the
+clean-scan case and when there are findings. The disclosure line:
+
+> Repository analysis: N transitively-reachable sinks caught (would
+> have been missed by per-file scan); N unresolved agent-entrypoint
+> calls not followed (dynamic dispatch / external modules).
+
+A CI gate (`tests/test_repository_disclosure_gate.py`, 8 tests)
+asserts the disclosure appears when the repo layer is enabled and is
+omitted when disabled (`--no-repository-analysis`).
+
+### Same-file same-class method resolution
+
+Ground truth (160-case labelled corpus): 12 of 14 confirmed
+AGENT_REACHABLE cases are METHODS. 9 of 14 same-file. 8 single-hop.
+The existing per-file reachability detector treats a sink in a
+non-`@tool` method as not-reachable — a helper method called from an
+agent-reachable entrypoint in the same class was invisible.
+
+**Added** `detect_same_class_method_reachability()` in
+`detectors/reachability.py`:
+- Same-file, same-class ONLY (no cross-file, no inheritance, no
+  dynamic dispatch)
+- Resolves `self.x()` and `Class.x()` calls where `x` is a method in
+  the same class body
+- Ambiguous names (duplicate definitions) are skipped entirely
+- BFS up to `max_hops=3` (configurable)
+- Distinct signal `same_class_method(N_hops)` — MEDIUM confidence,
+  below the HIGH confidence of a direct in-tool sink
+
+**Validation** against the 22 AGENT_REACHABLE labelled cases:
+- Before (per-file only): **0/22** caught
+- After (with same-class): **3/22** caught
+- The 3 caught are `LOCAL_HELPER_CALL` cases where the entrypoint and
+  sink are in the same class with `self.x()` calls (crewai StagehandTool,
+  superagi ApolloSearchTool, superagi SendEmailAttachmentTool)
+- 3/22 is below the ceiling of 12-14 — we are not over-following
+
+**Recall fixtures** added: `r11_same_class_method.py`,
+`r12_same_class_multi_hop.py`, `r13_same_class_three_hops.py`.
+
+### Recall bracket withdrawal (2026-09-20)
+
+> **WITHDRAWAL:** The 43%–52% recall bracket published in commit `129b926`
+> is **withdrawn**. Three defects invalidate it: (1) all 16 adjudications
+> moved in one direction; (2) 6 of 16 are scope changes, not reachability
+> judgements; (3) the highest-weight case was misclassified. The 14%–52%
+> bracket stands pending re-adjudication under pre-registered rules. See
+> [docs/RECALL.md](docs/RECALL.md) for the full withdrawal note.
+
+### CVE-2024-21552 rediscovery note (2026-09-20)
+
+The `superagi/agent/output_handler.py:180` `eval(assistant_reply)` case
+identified in the ground-truth pass is
+[CVE-2024-21552](https://nvd.nist.gov/vuln/detail/CVE-2024-21552) (CVSS 9.8,
+public since 2024). The scanner matched the sink but did not connect it to
+an agent boundary. See
+[REDISCOVERY-CVE-2024-21552.md](research/reachability-ground-truth/REDISCOVERY-CVE-2024-21552.md).
+No disclosure is required and none will be sent. The previously-committed
+draft report has been removed.
+
 
 ## [1.4.0] — 2026-07-29
 

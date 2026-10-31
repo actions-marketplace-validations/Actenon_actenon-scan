@@ -241,11 +241,14 @@ def _is_tainted(node: ast.expr, param_names: set[str]) -> bool:
       - A BinOp string concat containing a parameter: "https://" + host
       - An attribute access rooted at a parameter: req.url
       - A method call on a parameter: url.strip()
+      - A Tuple/List containing a tainted element: (run_id,), [query]
+      - A Dict containing a tainted value: {"query": query}
 
     Not tainted:
       - String literals: "https://api.vendor.com/..."
       - Module-level constants (Name nodes not in param_names)
       - self.attr (unless self is a param AND attr is tainted — rare)
+      - Tuples/Dicts/Lists of constants: (5, 'hello'), {"k": "v"}
     """
     if isinstance(node, ast.Name):
         return node.id in param_names
@@ -275,6 +278,21 @@ def _is_tainted(node: ast.expr, param_names: set[str]) -> bool:
         if isinstance(node.func, ast.Attribute):
             return _is_tainted(node.func.value, param_names)
         return False
+
+    # Phase 4: container propagation — check inside Tuples, Lists, Dicts
+    # This is the fix for the DeepAgents precision failures where taint
+    # inside (run_id,) or {"query": query} was invisible.
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return any(_is_tainted(elt, param_names) for elt in node.elts)
+
+    if isinstance(node, ast.Dict):
+        # Check values (keys are typically constants — checking values
+        # catches {"query": query, "api_key": "secret"})
+        return any(_is_tainted(v, param_names) for v in node.values)
+
+    if isinstance(node, ast.Starred):
+        # *args expansion — check the starred value
+        return _is_tainted(node.value, param_names)
 
     return False
 
@@ -1127,6 +1145,23 @@ def _origin_is_db(origin: ReceiverOrigin) -> bool:
     return False
 
 
+def _identifier_tokens(name: str) -> set[str]:
+    """Split an identifier into lowercase word tokens.
+
+    Handles snake_case, camelCase, PascalCase, SCREAMING_CASE and digits:
+      ``self.db_session`` -> {"self", "db", "session"}
+      ``sandbox_backend``  -> {"sandbox", "backend"}
+      ``asyncSession``     -> {"async", "session"}
+    """
+    tokens: set[str] = set()
+    for part in re.split(r"[^A-Za-z0-9]+", name):
+        if not part:
+            continue
+        for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]*|[a-z]+|[0-9]+", part):
+            tokens.add(word.lower())
+    return tokens
+
+
 def _name_looks_db(name: str) -> bool:
     """Heuristic: does a variable/attribute name look DB-ish?
 
@@ -1135,15 +1170,20 @@ def _name_looks_db(name: str) -> bool:
     is strong evidence, so a DB-ish name is sufficient confirming
     evidence here. Callers that need strict binding MUST use
     _origin_is_db instead.
+
+    Matching is anchored to WORD TOKENS, not raw substrings. An unanchored
+    substring test accepts any identifier that merely contains a DB name:
+    ``sandbox`` contains "db" (san-DB-ox), so ``sandbox.execute(cmd)`` was
+    reported as DATA-DELETE-SQL at HIGH severity -- a shell executor
+    mislabelled as destructive SQL. That is the same defect class as agno's
+    ``step.execute()``, which the receiver constraint was added to fix;
+    the constraint narrowed it rather than closing it.
+
+    Receivers whose NAME is uninformative but whose ORIGIN traces to a DB
+    constructor (``curr = conn.cursor()``) are still accepted -- by
+    _origin_is_db, which runs first in _is_db_receiver.
     """
-    name_lower = name.lower()
-    for db_name in _DB_RECEIVER_NAMES:
-        if name_lower == db_name or name_lower.startswith(db_name):
-            return True
-    for db_name in _DB_RECEIVER_NAMES:
-        if db_name in name_lower:
-            return True
-    return False
+    return bool(_identifier_tokens(name) & _DB_RECEIVER_NAMES)
 
 
 def _is_db_receiver(
@@ -1321,8 +1361,9 @@ def _get_attr_chain(node: ast.Attribute) -> str:
 
 
 def _call_to_text(node: ast.Call) -> str:
-    """Get a short text representation of the call for reporting."""
+    """The complete source text of the call (never truncated: authority compilation reads targets from
+    structured evidence, and reporting layers shorten for display themselves)."""
     try:
-        return ast.unparse(node)[:120]
+        return ast.unparse(node)
     except Exception:
         return "<call>"
