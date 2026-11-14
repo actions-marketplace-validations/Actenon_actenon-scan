@@ -18,10 +18,15 @@ Output structure (Part 2.1):
 from __future__ import annotations
 
 from actenon_scan.brief import Brief, build_brief
+from actenon_scan.report.airlock_handoff import AirlockHandoff, format_handoff
 
 
-def format_explain(brief: Brief) -> str:
-    """Format a brief as an execution-path explanation."""
+def format_explain(brief: Brief, *, handoff: AirlockHandoff | None = None) -> str:
+    """Format a brief as an execution-path explanation.
+
+    ``handoff`` adds the Airlock runtime-protection section when Scan's
+    authority evidence shows Airlock can act on this finding.
+    """
     lines: list[str] = []
 
     # Header
@@ -51,7 +56,14 @@ def format_explain(brief: Brief) -> str:
     # 3. EXECUTION PATH
     lines.append("3. EXECUTION PATH")
     lines.append(f"   tool input")
-    lines.append(f"   -> {brief.agent_entry_point.function_name}()")
+    if "->" in brief.data_flow.handler_step or "→" in brief.data_flow.handler_step:
+        import re as _re
+        for hop in _re.split(r"\s*(?:->|→)\s*", brief.data_flow.handler_step):
+            hop_clean = hop.strip()
+            if hop_clean:
+                lines.append(f"   -> {hop_clean}()")
+    else:
+        lines.append(f"   -> {brief.agent_entry_point.function_name}()")
     if brief.receiver_chain:
         lines.append(f"   -> {brief.receiver_chain.origin}...")
     lines.append(f"   -> {brief.sink.call_text}")
@@ -85,6 +97,10 @@ def format_explain(brief: Brief) -> str:
         if para.strip():
             lines.append(f"   {para}")
     lines.append("")
+
+    if handoff is not None:
+        lines.extend(format_handoff(handoff, indent="   "))
+        lines.append("")
 
     # Coverage
     lines.append("Coverage")

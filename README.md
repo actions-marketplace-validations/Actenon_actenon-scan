@@ -38,18 +38,60 @@ challenges become permanent regression tests when fixed.
 
 ---
 
-## Three ways to use it
+## Give Your Coding Agent Blast-Radius Eyes (30 Seconds)
 
-**Run locally** — no account, no cloud upload, zero-config first run:
+Copy this one sentence to **Claude Code, Cursor, Codex, Antigravity, Gemini CLI, Windsurf, or OpenClaw**:
 
-```bash
-uvx actenon-scan scan .
+```text
+Install actenon-scan and wire its agent skill by following https://raw.githubusercontent.com/Actenon/actenon-scan/main/docs/install.md
 ```
 
-**Add to GitHub** — one command generates a non-blocking workflow:
+Or run two commands yourself:
+
+```bash
+pip install "actenon-scan[all]"    # Python + TypeScript/JS + Go + YAML
+# Or zero-dependency Python core:
+pip install actenon-scan
+
+actenon-scan setup                 # installs SKILL.md into detected coding agents + runs `actenon-scan doctor`
+actenon-scan setup --mcp           # also registers zero-dep `actenon-scan mcp-server` in workspace .mcp.json
+```
+
+Once installed, just talk to your coding agent in plain English — or run the CLI directly:
+
+| What you ask your agent | What runs under the hood |
+|---|---|
+| *"What can this agent / MCP server do without permission?"* | `actenon-scan .` |
+| *"X-ray my `.mcp.json`, IDE MCP servers, and `SKILL.md` files"* | `actenon-scan audit --machine` |
+| *"Can prompt injection chain secret reads into outbound egress or poison skills?"* | `actenon-scan chains .` |
+| *"Generate an Agent Bill of Materials & lock approved capabilities for CI"* | `actenon-scan abom .` / `actenon-scan lock --check .` |
+| *"Audit my changed tools before I open a PR"* | `actenon-scan . --changed-only main` |
+| *"Why is `app/tools.py:47` flagged?"* | `actenon-scan explain app/tools.py:47` |
+| *"Add an authorization guard to `app/tools.py:47`"* | `actenon-scan fix app/tools.py:47` |
+| *"List every external resource this agent can touch"* | `actenon-scan authority .` |
+| *"Check if TypeScript and Go parsers are active"* | `actenon-scan doctor` |
+
+---
+
+## Four ways to use it
+
+**Run locally (zero install)** — no account, no cloud upload, zero-config first run:
+
+```bash
+uvx actenon-scan .
+```
+
+**Wire into your coding agent** — installs the embedded `SKILL.md` across Claude Code, Cursor, Codex, Gemini, Antigravity, Copilot, Windsurf, OpenClaw, and Hermes:
+
+```bash
+actenon-scan setup
+```
+
+**Add to GitHub or pre-commit** — one command generates a non-blocking workflow or local git hook:
 
 ```bash
 uvx actenon-scan install github
+uvx actenon-scan install pre-commit
 ```
 
 **Request a reviewed scan** — a maintainer-requested, manually adjudicated
@@ -263,6 +305,21 @@ actenon-scan fix path/to/file.py:42 --apply          # write the change
 Remediation is offered in neutral order: repository-native guard first,
 framework-native approval second, Actenon proof verification third.
 Actenon is not forced into every recommendation.
+
+## Optional: runtime control with Airlock
+
+**Discover with Scan. Protect and verify with Airlock. Built on Permit, Kernel and Protocol.**
+
+Scan is complete on its own. For one consequence, a GitHub file write from a Python agent
+(`github.contents.write`, e.g. PyGithub `create_file`), the default report also shows what
+[Actenon Airlock](https://github.com/Actenon/actenon-airlock) would do at runtime. If the
+repository is fixed in code, you can review and approve exactly that power, and Airlock refuses
+calls outside it. If the model chooses the repository, Scan says plainly that Airlock would keep
+the call blocked, and the repository-native guard stays the answer.
+
+Airlock is pre-release and not on a package registry. Local Mode enforces approval but does not
+verify the outcome on GitHub. Scan never installs, imports or approves anything in Airlock. What is
+and is not supported, with a checked walkthrough: [docs/AIRLOCK.md](docs/AIRLOCK.md).
 
 ## How to add it to a PR
 
@@ -606,12 +663,12 @@ Each finding ships with seven remediation routes. Scan does not pretend Actenon 
 1. **Add an existing internal guard.** If your codebase already has a guard function Scan didn't recognise, just add it via `actenon-scan init` and the finding disappears.
 2. **Register the guard with Scan.** Same as above — Scan treats your guards as first-class.
 3. **Use Actenon Kernel (proof verification).** For when you want proof-bound execution at the resource boundary. The Kernel is the trust anchor; it works without Permit or Cloud.
-4. **Use brokered Actenon protection (Permit + adapter).** For when you control the agent framework and want credentials never to reach the agent. The recommended developer on-ramp.
+4. **Use brokered Actenon protection.** For when you want credentials never to reach the agent. For Python agents, [Airlock](docs/AIRLOCK.md) packages discovery, approval and the broker into one CLI (pre-release). [Permit](https://github.com/Actenon/actenon-permit) is the underlying broker library, usable directly from your own framework code.
 5. **Use resource-owned verification.** For when the resource itself is the protected endpoint (FastAPI route, Express endpoint, Go handler). The Boundary Kit automates this.
-6. **Use Cloud-managed Actenon.** For when you want a hosted control plane with 9-layer evidence bundles. Optional.
+6. **Use Cloud-managed Actenon.** For when you want a hosted control plane with 9-layer evidence bundles. Optional; `actenon-cloud` is source-available to Actenon organisation members and not publicly installable.
 7. **Redesign the boundary.** Sometimes the right answer is to remove the consequential action from the agent's reachable tool surface entirely.
 
-**Cloud is optional.** Local brokered protection (route 4) works without any Cloud login.
+**Cloud is optional.** Local brokered protection (route 4) works without any Cloud login or account.
 
 ## What's in this repo
 
@@ -632,6 +689,10 @@ Each finding ships with seven remediation routes. Scan does not pretend Actenon 
 | Pretty reporter | [`actenon_scan/report/pretty.py`](actenon_scan/report/pretty.py) |
 | JSON reporter | [`actenon_scan/report/json_out.py`](actenon_scan/report/json_out.py) |
 | SARIF reporter | [`actenon_scan/report/sarif.py`](actenon_scan/report/sarif.py) |
+| Agent onboarding, `doctor`, & `skill` manager | [`actenon_scan/onboarding.py`](actenon_scan/onboarding.py) |
+| Embedded coding-agent skill | [`actenon_scan/skill/SKILL.md`](actenon_scan/skill/SKILL.md) |
+| Agent & human install guide | [`docs/install.md`](docs/install.md) |
+| LLM discovery index | [`llms.txt`](llms.txt) |
 | GitHub Action | [`action.yml`](action.yml) |
 | Security policy | [`SECURITY.md`](SECURITY.md) |
 | Contributing guide | [`CONTRIBUTING.md`](CONTRIBUTING.md) |

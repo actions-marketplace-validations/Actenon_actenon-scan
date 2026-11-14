@@ -21,6 +21,8 @@ Design constraints:
 
 from __future__ import annotations
 
+import re
+
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -183,6 +185,26 @@ _CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2}
 _DESTRUCTIVE_LABELS = {"DATA LOSS", "DATABASE", "REPOSITORY"}
 
 
+def is_literal_argument_value(value: str) -> bool:
+    """True when a call argument's source text is a plain constant.
+
+    ``branch="main"`` passes a constant: the keyword name ``branch`` is not
+    a model-controlled input. Shared by the summary display and the
+    most-exposed ranking so the two always agree. f-strings interpolate
+    values, so they are never treated as constants.
+    """
+    v = value.strip()
+    if not v:
+        return False
+    prefix = v[: len(v) - len(v.lstrip("bBrRuU"))]
+    if len(prefix) <= 2 and v[len(prefix):][:1] in ("'", '"'):
+        return True
+    return v in ("True", "False", "None") or _NUMBER.fullmatch(v) is not None
+
+
+_NUMBER = re.compile(r"[+-]?(\d[\d_]*\.?[\d_]*|\.\d[\d_]*)([eE][+-]?\d+)?j?")
+
+
 def _has_model_controlled_inputs(f: Finding) -> bool:
     """Check whether the finding has identified model-controlled inputs.
 
@@ -212,8 +234,10 @@ def _has_model_controlled_inputs(f: Finding) -> bool:
         arg = arg.strip()
         if not arg:
             continue
-        # Keyword arg with a name
+        # Keyword arg with a name, unless its value is a plain constant
         if "=" in arg:
+            if is_literal_argument_value(arg.split("=", 1)[1]):
+                continue
             return True
         # Positional arg that's a simple identifier (not a literal)
         if arg.isidentifier():
@@ -270,6 +294,68 @@ CLEAN_SCAN_LIMITATIONS = (
     "See https://github.com/Actenon/actenon-scan/blob/main/docs/COVERAGE.md "
     "for supported architectures and analysis limits."
 )
+
+
+# ---------------------------------------------------------------------------
+# Incomplete-analysis disclosure, shared by every output format.
+#
+# A supported file that fails to parse (SyntaxError, a newer Python than the
+# one Scan runs on, a decode error) is never analysed, and neither is anything
+# the cross-file pass would have found if that pass fails. A report that says
+# "no findings" or "supported source files were parsed and analysed" without
+# saying so overstates its coverage. These helpers give every format the same
+# facts in the same words. They never change findings or exit codes.
+# ---------------------------------------------------------------------------
+
+REPOSITORY_ANALYSIS_ERROR = "<repository-analysis>"
+
+_VERIFIED_COMPLETE = (
+    "supported source files were parsed and analysed for agent-reachable "
+    "consequential actions without a dominating authority check."
+)
+
+
+def parse_failures(result: ScanResult) -> list[tuple[str, str]]:
+    """Supported files that could not be analysed, as ``(path, error)``."""
+    return [(rel, err) for rel, err in result.analysis_errors if rel != REPOSITORY_ANALYSIS_ERROR]
+
+
+def repository_analysis_failed(result: ScanResult) -> bool:
+    """True when the cross-file (repository-level) analysis pass failed."""
+    return any(rel == REPOSITORY_ANALYSIS_ERROR for rel, _ in result.analysis_errors)
+
+
+def analysis_incomplete_statement(result: ScanResult) -> str | None:
+    """One sentence stating what was not analysed, or None when nothing failed."""
+    failures = parse_failures(result)
+    parts: list[str] = []
+    if failures:
+        parts.append(
+            f"{len(failures)} supported file(s) could not be parsed and were NOT analysed; "
+            "anything in them is unknown"
+        )
+    if repository_analysis_failed(result):
+        parts.append("repository-level (cross-file) analysis failed; transitive findings are unknown")
+    if not parts:
+        return None
+    return "ANALYSIS INCOMPLETE: " + "; ".join(parts) + "."
+
+
+def verified_statement(result: ScanResult) -> str:
+    """The "what this scan verified" sentence, qualified when files failed to parse."""
+    failures = parse_failures(result)
+    if not failures:
+        return _VERIFIED_COMPLETE
+    return (
+        "supported source files that parsed were analysed for agent-reachable "
+        "consequential actions without a dominating authority check; "
+        f"{len(failures)} supported file(s) could not be parsed and were not analysed."
+    )
+
+
+def clean_scan_limitations(result: ScanResult) -> str:
+    """``CLEAN_SCAN_LIMITATIONS`` with the verified sentence qualified for this result."""
+    return CLEAN_SCAN_LIMITATIONS.replace(_VERIFIED_COMPLETE, verified_statement(result), 1)
 
 
 def transitive_disclosure_line(result: ScanResult) -> str | None:
